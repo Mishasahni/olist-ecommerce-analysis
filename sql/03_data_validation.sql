@@ -1,3 +1,10 @@
+-- =====================================================================
+-- 03_data_validation.sql
+-- Data-quality checks run after loading (row counts, nulls, keys,
+-- referential integrity, dates, values). Findings are recorded as comments
+-- and the same checks are reproduced in python/data_cleaning.py.
+-- =====================================================================
+
 -- Check row counts for all tables
 SELECT
     (SELECT COUNT(*) FROM orders) AS orders,
@@ -51,8 +58,8 @@ WHERE order_status = 'delivered'
 -- Data quality check:
 -- 8 orders have order_status = 'delivered' but no
 -- order_delivered_customer_date.
--- These records represent ~0.008% of orders and are excluded
--- from delivery-time calculations rather than imputing a delivery date.
+-- These records represent ~0.008% of orders. They are kept, but excluded
+-- from delivery metrics (no date is imputed).
 
 ---------------------------*-------------------------*--------------------*-------------------------------*---------------------------
 -- Check for orders without approval dates (validating data integrity/nulls)
@@ -112,10 +119,9 @@ WHERE oi.order_id IS NULL
 GROUP BY o.order_status
 ORDER BY orders_without_items DESC;
 -- Data quality note:
--- 1 shipped order has no corresponding order_items record.
--- The order has a carrier timestamp but no item-level data.
--- Since this represents ~0.001% of orders, it is treated as
--- an isolated data-quality anomaly and no values are imputed.
+-- 775 orders (0.8%) have no order_items. They are mostly 'unavailable'
+-- and 'canceled' orders, so they carry no product sales value (GMV) and
+-- are excluded from AOV (AOV = GMV / orders with at least one item).
 
 ---Validate order_items → products relationship
 SELECT COUNT(*) AS items_without_product
@@ -154,3 +160,76 @@ LEFT JOIN product_category_translation t
 WHERE p.product_category_name IS NOT NULL
   AND t.product_category_name IS NULL
 ORDER BY p.product_category_name;
+
+-- ---------------------------------------------------------------------
+-- Duplicate checks on composite keys (also enforced by the PRIMARY KEYs)
+-- ---------------------------------------------------------------------
+SELECT order_id, order_item_id, COUNT(*)
+FROM order_items
+GROUP BY order_id, order_item_id
+HAVING COUNT(*) > 1;            -- expected: 0 rows
+
+-- review_id is not unique on its own, and some orders have several reviews
+SELECT
+    COUNT(*)                         AS review_rows,
+    COUNT(DISTINCT review_id)        AS distinct_review_ids,
+    COUNT(DISTINCT order_id)         AS reviewed_orders
+FROM reviews;
+-- FINDING: 99,224 rows, 98,410 review_ids, 98,673 orders.
+-- => review scores are averaged per order before joining to orders.
+
+-- ---------------------------------------------------------------------
+-- customer_id vs customer_unique_id
+-- WHY: customer_id is generated per order, so it cannot identify repeat
+-- customers. customer_unique_id is the real customer identifier.
+-- ---------------------------------------------------------------------
+SELECT
+    COUNT(*)                            AS customer_rows,
+    COUNT(DISTINCT customer_id)         AS distinct_customer_ids,
+    COUNT(DISTINCT customer_unique_id)  AS distinct_unique_customers
+FROM customers;
+-- FINDING: 99,441 customer_ids (= number of orders) but 96,096 real customers.
+
+-- ---------------------------------------------------------------------
+-- Date sequence checks
+-- ---------------------------------------------------------------------
+SELECT
+    COUNT(*) FILTER (WHERE order_approved_at < order_purchase_timestamp)              AS approved_before_purchase,
+    COUNT(*) FILTER (WHERE order_delivered_carrier_date < order_approved_at)          AS carrier_before_approval,
+    COUNT(*) FILTER (WHERE order_delivered_customer_date < order_purchase_timestamp)  AS delivered_before_purchase,
+    COUNT(*) FILTER (WHERE order_estimated_delivery_date < order_purchase_timestamp)  AS estimate_before_purchase,
+    COUNT(*) FILTER (WHERE order_delivered_customer_date IS NOT NULL
+                       AND order_status <> 'delivered')                               AS delivered_date_but_other_status
+FROM orders;
+-- FINDING: 1,359 orders were handed to the carrier before the recorded
+-- approval time (a timestamp-recording issue, gaps are mostly hours).
+-- They are kept; no analysis here depends on approval->carrier time.
+-- 6 orders have a delivery date but a non-delivered status (e.g. canceled);
+-- delivery metrics only use order_status = 'delivered'.
+
+-- ---------------------------------------------------------------------
+-- Value checks
+-- ---------------------------------------------------------------------
+SELECT
+    COUNT(*) FILTER (WHERE price <= 0)         AS non_positive_price,
+    COUNT(*) FILTER (WHERE freight_value < 0)  AS negative_freight,
+    COUNT(*) FILTER (WHERE freight_value = 0)  AS free_shipping_items
+FROM order_items;
+
+SELECT
+    COUNT(*) FILTER (WHERE payment_value <= 0)        AS zero_value_payments,
+    COUNT(*) FILTER (WHERE payment_installments <= 0) AS zero_installment_payments,
+    COUNT(*) FILTER (WHERE payment_type = 'not_defined') AS undefined_payment_type
+FROM payments;
+-- FINDING: 9 zero-value payments (mostly vouchers / not_defined) and 2 credit
+-- card payments with 0 installments. Kept: they do not affect totals and the
+-- installment analysis buckets start at 1.
+
+SELECT review_score, COUNT(*) FROM reviews GROUP BY review_score ORDER BY review_score;
+-- (scores are constrained to 1-5 by a CHECK constraint)
+
+-- Products without a category
+SELECT COUNT(*) AS products_without_category
+FROM products
+WHERE product_category_name IS NULL;
+-- FINDING: 610 products have no category; reported as 'unknown'.

@@ -1,3 +1,9 @@
+-- =====================================================================
+-- 04_exploratory_analysis.sql
+-- Exploratory queries used to understand the data before the business
+-- analysis. Each query has a WHY and, where relevant, a FINDING.
+-- Currency: Brazilian real (R$).
+-- =====================================================================
 
 -- 1. Check order status distribution
 -- WHY:
@@ -384,7 +390,7 @@ JOIN order_items oi
     ON o.order_id = oi.order_id
 GROUP BY DATE_TRUNC('month', o.order_purchase_timestamp)
 ORDER BY month;
---orders increased massively, while average order value stayed in roughly the ₹125–₹150 range.
+--orders increased massively, while average order value stayed in roughly the R$125–R$150 range.
 --The growth in product sales was primarily driven by an increase in order volume, rather than a substantial increase in average order value.
 
 --Which product categories sell the most items?
@@ -447,9 +453,10 @@ LIMIT 10;
 -- Top spending customers and their location
 -- WHY: Identify the highest-value customers and check whether
 -- they show any geographic concentration.
+-- Grouped by customer_unique_id so a customer's orders are combined.
 
 SELECT
-    o.customer_id,
+    c.customer_unique_id,
     c.customer_city,
     c.customer_state,
     COUNT(DISTINCT o.order_id) AS order_count,
@@ -460,7 +467,7 @@ JOIN customers c
 JOIN order_items oi
     ON o.order_id = oi.order_id
 GROUP BY
-    o.customer_id,
+    c.customer_unique_id,
     c.customer_city,
     c.customer_state
 ORDER BY total_spent DESC
@@ -470,6 +477,7 @@ LIMIT 20;
 -- WHY: Understand whether customers typically place one order
 -- or return and place multiple orders.
 
+-- First attempt (customer_id):
 SELECT
     order_count,
     COUNT(*) AS customer_count
@@ -483,6 +491,24 @@ FROM (
 GROUP BY order_count
 ORDER BY order_count;
 --Each order is associated with a unique customer ID in the provided dataset, so repeat-purchase behavior cannot be reliably analyzed using customer_id alone.
+
+-- Corrected (customer_unique_id = the real customer):
+SELECT
+    order_count,
+    COUNT(*) AS customer_count
+FROM (
+    SELECT
+        c.customer_unique_id,
+        COUNT(DISTINCT o.order_id) AS order_count
+    FROM orders o
+    JOIN customers c
+        ON o.customer_id = c.customer_id
+    GROUP BY c.customer_unique_id
+) customer_orders
+GROUP BY order_count
+ORDER BY order_count;
+-- FINDING: 93,099 customers ordered once, 2,997 (3.1%) ordered more than once.
+-- Repeat behaviour is analysed in 05_business_analysis.sql.
 
 -- Orders by customer state
 -- WHY: Identify where the marketplace's customer demand is concentrated.
@@ -499,21 +525,6 @@ ORDER BY order_count DESC;
 
 -- Product sales value by customer state
 -- WHY: Compare geographic order volume with financial contribution.
--- This helps determine whether high-order states also generate
--- high product sales value.
-
-SELECT
-    c.customer_state,
-    COUNT(DISTINCT o.order_id) AS order_count,
-    SUM(oi.price) AS sales_value
-FROM orders o
-JOIN customers c
-    ON o.customer_id = c.customer_id
-JOIN order_items oi
-    ON o.order_id = oi.order_id
-GROUP BY c.customer_state
-ORDER BY sales_value DESC;
-
 --Does the state with the most orders also generate the most sales?
 SELECT
     c.customer_state,
@@ -570,7 +581,8 @@ SELECT
     ) AS avg_delivery_time
 FROM orders
 WHERE order_status = 'delivered'
-  AND order_delivered_customer_date IS NOT NULL;
+  AND order_delivered_customer_date IS NOT NULL
+  AND order_estimated_delivery_date IS NOT NULL;
 
   -- Late delivery rate
 -- WHY: Measure whether orders are arriving later than the
@@ -602,7 +614,7 @@ WHERE order_status = 'delivered'
 SELECT
     review_score,
     COUNT(*) AS review_count
-FROM eviews
+FROM reviews
 GROUP BY review_score
 ORDER BY review_score;
 
@@ -619,7 +631,10 @@ SELECT
 FROM reviews r
 JOIN orders o
     ON r.order_id = o.order_id
-WHERE o.order_delivered_customer_date IS NOT NULL
+WHERE o.order_status = 'delivered'
+  AND o.order_delivered_customer_date IS NOT NULL
   AND o.order_estimated_delivery_date IS NOT NULL
 GROUP BY r.review_score
 ORDER BY r.review_score;
+-- FINDING: late orders make up a much larger share of 1- and 2-star reviews
+-- than of 4- and 5-star reviews (see 05_business_analysis.sql, Q7).
